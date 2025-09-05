@@ -1,0 +1,22 @@
+# ✅ Python 3.13.7–compatible
+streamlit==1.38.0
+opencv-python-headless==4.12.0.88
+numpy==2.1.3
+scipy==1.16.1
+pydantic==2.9.2
+Pillow==10.4.0
+tqdm==4.66.5
+xxhash==3.4.1
+
+# PyTorch stack (supports 3.13)
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+
+# FFmpeg bindings (use 'av', not 'pyav'; drop the duplicate)
+av==14.4.0
+
+# ⚠️ Ultralytics: pip wheels for 3.13 have lagged historically.
+# If pip fails on 3.13, use conda-forge (often ships 3.13 builds),
+# or create a Python 3.12 venv just for Ultralytics.
+ultralytics==8.3.17
