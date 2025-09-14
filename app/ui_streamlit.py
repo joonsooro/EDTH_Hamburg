@@ -1,21 +1,46 @@
 from __future__ import annotations
-import os, io, json, hashlib, time
+import sys, os, io, json, hashlib, time
 import av
-import numpy as np
+import numpy as np, time, hashlib, cv2
 import cv2
 import streamlit as st
 from datetime import datetime
 from typing import List, Dict
 
-from vision.detector import YoloTinyDetector, DEFAULT_CLASS_MAP
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from vision.detector import Detector, YoloTinyDetector, DEFAULT_CLASS_MAP
 from vision.tracker import IOUTracker, Track
-from vision.relation import CarrierRelationConfig, relation_alert
+from vision.relation import CarrierRelationConfig, relation_alert_debug
+from vision.motion import motion_candidates
+from vision.relation import pylon_band  # ensure it's exported in relation.py
 from app.salute_schema import default_salute, Location
+
+
+# Class map for your trained head
+DEFAULT_CLASS_MAP = {0: "fixed_wing", 1: "quad"}
+
+# Relation config must match trained class names
+rel_cfg = CarrierRelationConfig(
+    mothership_cls_names=("fixed_wing",),
+    parasite_cls_names=("quad",),
+    band_rel_top=0.05, band_rel_bottom=0.55, band_rel_width=0.90,
+    size_ratio_min=0.005, size_ratio_max=0.60,
+    min_persist_frames=2, window_frames=12,
+    vel_cos_min=0.0
+)
+
+# # Use your trained model (pt) with small-object friendly settings
+detector = Detector(weights="models/best.pt", conf=0.05)  # imgsz handled inside Detector
+tracker  = IOUTracker(iou_thresh=0.20, max_missed=20, max_history=rel_cfg.window_frames)
+
 
 EXPORT_DIR = "export/incidents"
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 st.set_page_config(page_title="EDTH Hamburg ISR Demo", layout="wide")
+st.sidebar.text(f"Model: models/best.pt @ imgsz={detector.imgsz} conf={detector.conf}")
+st.sidebar.text(f"Classes: {detector.model.names}")
 
 def tracks_from_synth_labels(json_path, frame_idx):
     """Return a list of Track objects for this frame from synth JSON labels."""
@@ -29,7 +54,7 @@ def tracks_from_synth_labels(json_path, frame_idx):
 
     # Mothership as tid=1
     ms_box = np.array(fr["fixed_wing"], dtype=float)
-    ms = Track(tid=1, box=ms_box, cls=4, conf=0.99)  # cls=4 ~ 'airplane' in COCO
+    ms = Track(tid=1, box=ms_box, cls=0, conf=0.99)  # cls=4 ~ 'airplane' in COCO
     # give it a short history so velocity isn't zero
     ms.history = [ms_box.copy()] * 10
     tracks.append(ms)
@@ -38,7 +63,7 @@ def tracks_from_synth_labels(json_path, frame_idx):
     tid = 100
     for pbox in fr["parasites"]:
         pb = np.array(pbox, dtype=float)
-        pt = Track(tid=tid, box=pb, cls=14, conf=0.80)  # cls=14 ~ 'bird' proxy
+        pt = Track(tid=tid, box=pb, cls=1, conf=0.80)  # cls=14 ~ 'bird' proxy
         pt.history = [pb.copy()] * 10
         tracks.append(pt)
         tid += 1
@@ -46,23 +71,39 @@ def tracks_from_synth_labels(json_path, frame_idx):
     return tracks
 
 
-@st.cache_resource
+# @st.cache_resource
 def load_models():
-    detector = YoloTinyDetector(weights="yolov8n.pt", imgsz=720, conf=0.25, iou=0.45)
-    tracker = IOUTracker(iou_thresh=0.3, max_missed=10)
+    # detector = YoloTinyDetector(weights="yolov8n.pt", imgsz=720, conf=0.25, iou=0.45)
+    # in your Streamlit init
+    # tracker  = IOUTracker(iou_thresh=0.20, max_missed=20, max_history=rel_cfg.window_frames)
+
     rel_cfg = CarrierRelationConfig(
-        mothership_cls_names=("airplane","fixed_wing"),
-        parasite_cls_names=("bird","drone","quadcopter"),  # permissive; rule filters by size + band + velocity
-        band_rel_top=0.15, band_rel_bottom=0.35, band_rel_width=0.7,
-        size_ratio_min=0.05, size_ratio_max=0.18,
-        min_persist_frames=8, window_frames=12,
-        vel_cos_min=0.8
+    mothership_cls_names=("fixed_wing",),
+    parasite_cls_names=("quad",),
+    band_rel_top=0.05, band_rel_bottom=0.55, band_rel_width=0.90,
+    size_ratio_min=0.005, size_ratio_max=0.60,
+    min_persist_frames=2, window_frames=12,
+    vel_cos_min=0.0
     )
+
     return detector, tracker, rel_cfg
 
-detector, tracker, rel_cfg = load_models()
+# detector, tracker, rel_cfg = load_models()
+
+def rect_halo(mbox, grow=0.35):
+    x1,y1,x2,y2 = mbox
+    w, h = (x2-x1), (y2-y1)
+    cx, cy = 0.5*(x1+x2), 0.5*(y1+y2)
+    gw, gh = w*(1.0+grow), h*(1.0+grow)
+    return np.array([cx-gw/2, cy-gh/2, cx+gw/2, cy+gh/2], dtype=float)
 
 st.sidebar.title("Controls")
+source = st.sidebar.selectbox("Video source", ["Sample clip", "Upload MP4"])
+ew_mode = st.sidebar.toggle("EW MODE (simulate link degradation)", value=False)
+target_fps = st.sidebar.slider("Target FPS (cap)", 10, 30, 24)
+conf_thresh = st.sidebar.slider("Detector conf", 0.1, 0.7, 0.25, 0.05)
+st.sidebar.info("Tip: keep 720p sources for stable throughput.")
+
 DEV_MODE = st.sidebar.toggle("Developer mode", value=False)
 # These toggles are for debugging mode/force-alert mode that is used for crisis
 if DEV_MODE:
@@ -71,11 +112,16 @@ if DEV_MODE:
 else:
     debug_labels = False
     force_alert  = False
-source = st.sidebar.selectbox("Video source", ["Sample clip", "Upload MP4"])
-ew_mode = st.sidebar.toggle("EW MODE (simulate link degradation)", value=False)
-target_fps = st.sidebar.slider("Target FPS (cap)", 10, 30, 24)
-conf_thresh = st.sidebar.slider("Detector conf", 0.1, 0.7, 0.25, 0.05)
-st.sidebar.info("Tip: keep 720p sources for stable throughput.")
+
+st.sidebar.text(f"Model: models/best.pt @ imgsz={detector.imgsz} conf={detector.conf}")
+
+st.sidebar.subheader("Heuristic (no-ML) parasites")
+use_motion = st.sidebar.toggle("Enable motion-parasite heuristic", value=False)
+mag_thresh = st.sidebar.slider("Flow mag threshold", 0.5, 5.0, 1.6, 0.1)
+min_blob = st.sidebar.slider("Min blob area", 5, 200, 25, 5)
+max_blob = st.sidebar.slider("Max blob area", 200, 5000, 2000, 50)
+halo_fallback = st.sidebar.toggle("Use leader halo if no fixed-wing", value=True)
+halo_grow = st.sidebar.slider("Leader halo grow", 0.1, 1.0, 0.35, 0.05)
 
 if source == "Sample clip":
     sample_path = st.sidebar.text_input("Path", "data/golden/sample1.mp4")
@@ -111,15 +157,30 @@ if "incidents" not in st.session_state:
 def draw_boxes(image, tracks, alerts):
     img = image.copy()
     for t in tracks:
+        name = DEFAULT_CLASS_MAP.get(int(t.cls), str(int(t.cls)))
+        color = (255,128,0) if name=="fixed_wing" else (0,255,255)
         x1,y1,x2,y2 = [int(v) for v in t.box]
-        color = (0,255,0)
         cv2.rectangle(img, (x1,y1), (x2,y2), color, 2)
-        cv2.putText(img, f"id{t.tid}", (x1, y1-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-    for al in alerts:
-        x1,y1,x2,y2 = [int(v) for v in al["band"]]
+        cv2.putText(img, f"{name} id{t.tid}", (x1, y1-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    for al in alerts or []:
+        # accept dict with "band" OR a raw [x1,y1,x2,y2]
+        band = None
+        if isinstance(al, dict) and "band" in al:
+            band = al["band"]
+            label = f"Carrier+{al.get('parasite_count', '?')}"
+        elif isinstance(al, (list, tuple, np.ndarray)) and len(al) == 4:
+            band = al
+            label = "Carrier"
+        else:
+            continue
+
+        x1,y1,x2,y2 = [int(v) for v in band]
         cv2.rectangle(img, (x1,y1), (x2,y2), (0,165,255), 2)
-        cv2.putText(img, f"Carrier+{al['parasite_count']}", (x1, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)
+        cv2.putText(img, label, (x1, max(0, y1-8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,165,255), 2)
     return img
+
 
 def sha256_file(path: str) -> str:
     h = hashlib.sha256()
@@ -170,13 +231,31 @@ if run_clicked and sample_path and os.path.exists(sample_path):
     last_alert_t = 0.0
     t_start = time.perf_counter()
 
+    prev_gray = None
     for frame in container.decode(video=0):
         img = frame.to_ndarray(format="bgr24")
 
+        # === STEP 7: A/B sanity check (place RIGHT HERE) ===
+        # === STEP 7: A/B sanity check ===
+        if 'ab_done' not in st.session_state:
+            st.session_state.ab_done = False
+        if not st.session_state.ab_done and frame_count == 5:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            r = detector.model.predict(img_rgb, conf=0.03, imgsz=960, verbose=False)[0]
+            st.caption(f"A/B check: r.boxes={0 if r.boxes is None else len(r.boxes)}")
+            vis = r.plot()  # expects RGB input already
+            st.image(vis, caption="Ultralytics plot() on this exact frame", use_column_width=True)
+            st.session_state.ab_done = True
+        # === END STEP 7 ===
+
+        # === END STEP 7 ===
+
         # optional downscale to 720p height
-        scale = 720.0 / img.shape[0]
-        if abs(scale - 1.0) > 1e-3:
-            img = cv2.resize(img, (int(img.shape[1]*scale), 720), interpolation=cv2.INTER_AREA)
+        # scale = 720.0 / img.shape[0]
+        # if abs(scale - 1.0) > 1e-3:
+        #     img = cv2.resize(img, (int(img.shape[1]*scale), 720), interpolation=cv2.INTER_AREA)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # detection / tracks
         detector.conf = float(conf_thresh)
@@ -184,27 +263,135 @@ if run_clicked and sample_path and os.path.exists(sample_path):
             json_path = sample_path.replace(".mp4", ".json")  # synth_gen writes the json next to mp4
             tracks = tracks_from_synth_labels(json_path, frame_count)  # <-- frame_count now advances
         else:
+            h,w = img.shape[:2]
+            st.caption(f"frame {frame_count} | shape={img.shape} dtype={img.dtype} rng={np.min(img)}..{np.max(img)}")
+            # optional: hash a downsample to prove frames change
+            hsh = hashlib.sha1(cv2.resize(img, (min(64,w), min(64,h))).tobytes()).hexdigest()[:8]
+            st.caption(f"frame hash={hsh}")
+
             boxes, confs, clses = detector.infer_bgr(img)
+            # --- RAW DETECTION DEBUG (temporary) ---
+            if 'show_raw' not in st.session_state: st.session_state.show_raw = True
+            if st.session_state.show_raw:
+                dbg = img.copy()
+                for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
+                    name = DEFAULT_CLASS_MAP.get(int(k), str(int(k)))
+                    color = (0,255,255) if name=='quad' else (255,128,0)
+                    cv2.rectangle(dbg, (int(x1),int(y1)), (int(x2),int(y2)), color, 2)
+                    cv2.putText(dbg, f"{name} {c:.2f}", (int(x1), max(0,int(y1)-4)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+                frame_out.image(dbg, channels="BGR", use_column_width=True)
+                st.caption(f"RAW: boxes={len(clses)} | quads={(clses==1).sum()} | fw={(clses==0).sum()}")
+            # ---------------------------------------
             tracks = tracker.update(boxes, confs, clses)
+        
+        # Choose mothership: prefer fixed-wing (COCO 'airplane'=4) else largest track if halo_fallback
+        mships = [t for t in tracks if DEFAULT_CLASS_MAP.get(int(t.cls)) == "fixed_wing"]
+        ms = mships[0] if mships else (max(tracks, key=lambda t: (t.box[2]-t.box[0])*(t.box[3]-t.box[1])) if (halo_fallback and tracks) else None)
+
+        # Region to search: pylon band for fixed-wing, otherwise a symmetric halo
+        region = None
+        # after you define `ms` and before relation
+        if ms is not None:
+            band = pylon_band(ms.box, rel_cfg)
+            bx1, by1, bx2, by2 = [int(v) for v in band]
+            dbg_img = img.copy()
+            cv2.rectangle(dbg_img, (bx1, by1), (bx2, by2), (0, 165, 255), 2)
+            # plot parasite centers
+            for t in tracks:
+                name = DEFAULT_CLASS_MAP.get(int(t.cls))
+                if name == "quad":
+                    cx = int(0.5 * (t.box[0] + t.box[2])); cy = int(0.5 * (t.box[1] + t.box[3]))
+                    cv2.circle(dbg_img, (cx, cy), 3, (0, 255, 255), -1)
+            st.image(dbg_img, caption="Band & parasite centers (debug)", use_column_width=True)
+
+        # Motion parasites → pseudo-tracks
+        motion_tracks = []
+        if use_motion and region is not None:
+            mot_boxes = motion_candidates(prev_gray, gray, region,
+                                        mag_thresh=mag_thresh,
+                                        min_area=min_blob, max_area=max_blob)
+            tid_base = 5000
+            for i, b in enumerate(mot_boxes):
+                tt = Track(tid=tid_base+i, box=b, cls=14, conf=0.6)  # cls 14: 'bird' proxy
+                # give a tiny history so velocity() won't be zero
+                tt.history = [b.copy()]
+                motion_tracks.append(tt)
+        
+        # Merge motion candidates with detector tracks for relation check
+        tracks_for_relation = tracks + motion_tracks
+
+        # --- RELATION DIAGNOSTIC ---
+        def _area(b): 
+            return max(1, (b[2]-b[0])) * max(1, (b[3]-b[1]))
+        diag = ""
+        ms = None
+        mships = [t for t in tracks_for_relation if DEFAULT_CLASS_MAP.get(int(t.cls)) == "fixed_wing"]
+        if mships:
+            ms = mships[0]
+            band = pylon_band(ms.box, rel_cfg)
+            paras = [t for t in tracks_for_relation if DEFAULT_CLASS_MAP.get(int(t.cls)) == "quad"]
+            inside, ratios, persists = [], [], []
+            for t in paras:
+                cx = 0.5*(t.box[0]+t.box[2]); cy = 0.5*(t.box[1]+t.box[3])
+                if band[0] <= cx <= band[2] and band[1] <= cy <= band[3]:
+                    inside.append(t)
+                    ratios.append(_area(t.box)/_area(ms.box))
+                    persists.append(len(t.history))
+            diag = f"band_in={len(inside)}/{len(paras)} | ratios={[round(r,3) for r in ratios[:4]]} | persist={[min(p,99) for p in persists[:4]]}"
+            st.caption(diag)
+        # --- END DIAGNOSTIC ---
 
         # relation
-        alerts = relation_alert(tracks, DEFAULT_CLASS_MAP, rel_cfg)
+        alerts = []
+        if ms is not None:
+            band = pylon_band(ms.box, rel_cfg)
+            paras = [t for t in tracks_for_relation if DEFAULT_CLASS_MAP.get(int(t.cls)) == "quad"]
+            inside = []
+            for t in paras:
+                cx = 0.5*(t.box[0]+t.box[2]); cy = 0.5*(t.box[1]+t.box[3])
+                if band[0] <= cx <= band[2] and band[1] <= cy <= band[3]:
+                    inside.append(t)
+            if len(inside) >= 1:  # prove plumbing; remove after you see it fire
+                alerts = [{
+                    "mothership_tid": ms.tid,
+                    "parasite_tids": [t.tid for t in inside],
+                    "band": [int(x) for x in band],
+                    "parasite_count": len(inside),
+                    "note": "SIMPLE_BAND_TRIGGER"
+                }]
+
+        # fall back to full logic only if simple trigger didn't fire
+        if not alerts:
+            alerts, rdbg = relation_alert_debug(tracks_for_relation, DEFAULT_CLASS_MAP, rel_cfg)
+            if rdbg:
+                why = rdbg.get("reason", "")
+                cand = rdbg.get("candidates", [])
+                ok = [c for c in cand if c.get("reason")=="OK"]
+                st.caption(f"REL dbg: mship={rdbg.get('mship_tid')} OK={len(ok)}/{len(cand)} reason={why or '—'}")
+
 
         # optional force alert (only override if nothing fired)
         if force_alert and not alerts:
-            mships = [t for t in tracks if t.cls == 4]  # COCO 'airplane' proxy
+            mships = [t for t in tracks if DEFAULT_CLASS_MAP.get(int(t.cls)) == "fixed_wing"]
             ms = mships[0] if mships else (max(tracks, key=lambda t: (t.box[2]-t.box[0])*(t.box[3]-t.box[1])) if tracks else None)
             if ms:
+                band = pylon_band(ms.box, rel_cfg)
                 alerts = [{
                     "mothership_tid": ms.tid,
                     "parasite_tids": [t.tid for t in tracks if t.tid != ms.tid][:2],
-                    "band": [int(ms.box[0]), int((ms.box[1]+ms.box[3])//2), int(ms.box[2]), int(ms.box[3])],
+                    "band": [int(x) for x in band],
                     "parasite_count": min(2, max(0, len(tracks)-1)),
                     "note": "FORCED_ALERT_DEMO"
                 }]
 
         # --- draw & show (ALWAYS) ---
         out = draw_boxes(img, tracks, alerts)
+        if region is not None:
+            x1,y1,x2,y2 = [int(v) for v in region]
+            cv2.rectangle(out, (x1,y1), (x2,y2), (255, 200, 0), 2)
+            cv2.putText(out, "band" if (mships and len(mships)>0) else "halo",
+                        (x1, max(10,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
         frame_out.image(out, channels="BGR", use_column_width=True)
 
         # incidents
@@ -228,6 +415,7 @@ if run_clicked and sample_path and os.path.exists(sample_path):
         sleep_budget = max(0.0, (1.0/float(target_fps)) - (time.perf_counter()-now))
         if sleep_budget > 0:
             time.sleep(sleep_budget)
+        prev_gray = gray
 
 with incidents_list:
     for i, inc in enumerate(reversed(st.session_state.incidents[-10:])):

@@ -23,14 +23,14 @@ def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 class CarrierRelationConfig:
     def __init__(
         self,
-        mothership_cls_names=("airplane","fixed_wing"),
-        parasite_cls_names=("bird","drone","quadcopter"),
-        band_rel_top=0.15, band_rel_bottom=0.35, band_rel_width=0.7,
-        size_ratio_min=0.01,    # from 0.05 → 0.01
-        size_ratio_max=0.5,     # from 0.18 → 0.5
-        min_persist_frames=2,   # from 8 → 2
-        vel_cos_min=0.0,        # from 0.8 → 0.0
+        mothership_cls_names=("fixed_wing",),       # ✅ your trained names
+        parasite_cls_names=("quad",),               # ✅ your trained names
+        band_rel_top=0.12, band_rel_bottom=0.22, band_rel_width=0.60,
+        size_ratio_min=0.015, size_ratio_max=0.50,
+        min_persist_frames=3,                      # start easier; tune up later
+        vel_cos_min=0.6,                           # start easier; guard below
         window_frames=12,
+        min_speed_px=0.5                           # NEW: tiny-speed guard
     ):
         self.mship_names = set(mothership_cls_names)
         self.parasite_names = set(parasite_cls_names)
@@ -42,6 +42,7 @@ class CarrierRelationConfig:
         self.min_persist_frames = min_persist_frames
         self.window_frames = window_frames
         self.vel_cos_min = vel_cos_min
+        self.min_speed_px = min_speed_px
 
 def clsname(id_: int, class_map: Dict[int,str]) -> str:
     return class_map.get(id_, str(id_))
@@ -51,66 +52,107 @@ def box_area(b):
     return max(0.0, x2-x1) * max(0.0, y2-y1)
 
 def pylon_band(mbox: np.ndarray, cfg: CarrierRelationConfig):
-    x1,y1,x2,y2 = mbox
+    x1, y1, x2, y2 = mbox
     w = x2 - x1
     h = y2 - y1
-    cx, cy = 0.5*(x1+x2), 0.5*(y1+y2)
-    band_top = cy + cfg.band_rel_top * h
-    band_bot = cy + cfg.band_rel_bottom * h
+    cx = 0.5 * (x1 + x2)
+    # ✅ reference from TOP edge, not box center
+    band_top = y1 + cfg.band_rel_top * h
+    band_bot = y1 + cfg.band_rel_bottom * h
     half_w = 0.5 * cfg.band_rel_width * w
-    return np.array([cx - half_w, band_top, cx + half_w, band_bot])
+    return np.array([cx - half_w, band_top, cx + half_w, band_bot], dtype=float)
 
 def is_in_band(box: np.ndarray, band: np.ndarray) -> bool:
     bx, by = center(box)
     x1,y1,x2,y2 = band
     return (x1 <= bx <= x2) and (y1 <= by <= y2)
 
-def relation_alert(tracks, class_map: Dict[int,str], cfg: CarrierRelationConfig):
+def relation_alert_debug(tracks, class_map, cfg):
+    """
+    Returns (alerts, debug) where debug is a dict with:
+      - mship_box, band
+      - candidates: list of {tid, cls_name, in_band, ratio, persist, vel_cos, reason}
+    """
+    dbg = {"mship_tid": None, "mship_box": None, "band": None, "candidates": []}
     alerts = []
-    # Extract candidate motherships and parasites from tracks
+
+    # pick mothership by name
     mships = [t for t in tracks if clsname(t.cls, class_map) in cfg.mship_names]
-    candidates = [t for t in tracks if clsname(t.cls, class_map) in cfg.parasite_names or True]  # permissive; filtered by size/band
-    for ms in mships:
-        band = pylon_band(ms.box, cfg)
-        ms_v = velocity(ms)
-        ms_area = box_area(ms.box)
-        # Find parasite candidates meeting size, band, and velocity-correlation
-        parasites = []
-        for t in candidates:
-            if t.tid == ms.tid:
-                continue
-            pr_area = box_area(t.box)
-            if pr_area <= 0: 
-                continue
-            ratio = pr_area / (ms_area + 1e-6)
-            if not (cfg.size_ratio_min <= ratio <= cfg.size_ratio_max):
-                continue
-            if not is_in_band(t.box, band):
-                continue
-            v = velocity(t)
-            if cos_sim(ms_v, v) < cfg.vel_cos_min:
-                continue
-            # Temporal persistence check
-            persist = min(len(t.history), cfg.window_frames)
-            # crude proxy: require last persist frames to exist
-            if persist < cfg.min_persist_frames:
-                continue
+    if not mships:
+        dbg["reason"] = "NO_MOTHERSHIP_FOUND"
+        return alerts, dbg
+    ms = mships[0]
+    dbg["mship_tid"] = ms.tid
+    dbg["mship_box"] = ms.box.tolist()
+
+    band = pylon_band(ms.box, cfg)
+    dbg["band"] = band.tolist()
+
+    ms_v = velocity(ms)
+    ms_speed = float(np.linalg.norm(ms_v))
+    ms_area = box_area(ms.box)
+
+    pr_cands = [t for t in tracks if clsname(t.cls, class_map) in cfg.parasite_names]
+    parasites = []
+    for t in pr_cands:
+        entry = {"tid": int(t.tid), "cls_name": clsname(t.cls, class_map)}
+        # skip self
+        if t.tid == ms.tid:
+            entry["reason"] = "SELF_SKIP"
+            dbg["candidates"].append(entry); continue
+
+        pr_area = box_area(t.box)
+        ratio = pr_area / (ms_area + 1e-6) if pr_area > 0 else 0.0
+        entry["ratio"] = round(float(ratio), 4)
+
+        # band
+        cx = 0.5*(t.box[0]+t.box[2]); cy = 0.5*(t.box[1]+t.box[3])
+        in_band = (band[0] <= cx <= band[2]) and (band[1] <= cy <= band[3])
+        entry["in_band"] = bool(in_band)
+
+        # persistence
+        persist = min(len(t.history), cfg.window_frames)
+        entry["persist"] = int(persist)
+
+        # velocity
+        v = velocity(t)
+        vel_cos = float(cos_sim(ms_v, v)) if (len(t.history)>=3 and len(ms.history)>=3) else None
+        entry["vel_cos"] = None if vel_cos is None else round(vel_cos, 3)
+
+        # gating with explicit reason capture
+        if pr_area <= 0:
+            entry["reason"] = "BAD_AREA"
+        elif not (cfg.size_ratio_min <= ratio <= cfg.size_ratio_max):
+            entry["reason"] = "RATIO_FAIL"
+        elif not in_band:
+            entry["reason"] = "OUT_OF_BAND"
+        elif persist < cfg.min_persist_frames:
+            entry["reason"] = "PERSIST_FAIL"
+        elif (vel_cos is not None) and (max(np.linalg.norm(v), np.linalg.norm(ms_v)) >= cfg.min_speed_px) and (vel_cos < cfg.vel_cos_min):
+            entry["reason"] = "VEL_COS_FAIL"
+        else:
+            entry["reason"] = "OK"
             parasites.append(t)
 
-        # Simple symmetry heuristic (left/right roughly around center)
-        lefts, rights = 0, 0
-        cx, _ = center(ms.box)
-        for p in parasites:
-            px, _ = center(p.box)
-            if px < cx: lefts += 1
-            else: rights += 1
+        dbg["candidates"].append(entry)
 
-        if len(parasites) >= 1 and (lefts >= 1 and rights >= 1 or len(parasites) >= 2):
+    # symmetry or ≥2
+    if parasites:
+        cx_ms, _ = center(ms.box)
+        lefts = sum(1 for p in parasites if center(p.box)[0] < cx_ms)
+        rights = len(parasites) - lefts
+        if (lefts >= 1 and rights >= 1) or len(parasites) >= 2:
             alerts.append({
                 "mothership_tid": ms.tid,
                 "parasite_tids": [p.tid for p in parasites],
                 "band": band.tolist(),
                 "parasite_count": len(parasites),
-                "note": f"carrier_with_parasites persisted >= {cfg.min_persist_frames}/{cfg.window_frames} frames"
+                "note": f"carrier_with_parasites ≥{cfg.min_persist_frames}/{cfg.window_frames}"
             })
-    return alerts
+        else:
+            dbg["reason"] = f"SYMMETRY_FAIL (L={lefts}, R={rights}, N={len(parasites)})"
+
+    if not alerts and "reason" not in dbg:
+        dbg["reason"] = "NO_PARASITES_OK"
+    return alerts, dbg
+

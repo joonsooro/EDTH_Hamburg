@@ -7,7 +7,7 @@ from vision.tracker import IOUTracker
 from vision.relation import CarrierRelationConfig, relation_alert
 
 def eval_dir(dirpath: str, conf: float, size_ratio_min: float, size_ratio_max: float, persist: int):
-    detector = YoloTinyDetector(conf=conf)
+    detector = Detector(weights="models/best.pt", conf=0.05)  # imgsz handled inside Detector
     tracker = IOUTracker()
     cfg = CarrierRelationConfig(size_ratio_min=size_ratio_min, size_ratio_max=size_ratio_max, min_persist_frames=persist)
     alerts, frames = 0, 0
