@@ -1,0 +1,6 @@
+path: data/synth_frames
+train: images/train
+val: images/val
+names:
+  0: fixed_wing
+  1: quad
