@@ -1,0 +1,15 @@
+{
+  "weights": "models/best.pt",
+  "names": {
+    "0": "fixed_wing",
+    "1": "quad"
+  },
+  "mothership_names_accepted": [
+    "fixed_wing"
+  ],
+  "parasite_names_accepted": [
+    "quad"
+  ],
+  "status": "OK",
+  "survivors": null
+}

@@ -27,7 +27,8 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / union)
 
 class Track:
-    def __init__(self, tid: int, box: np.ndarray, cls: int, conf: float, max_history: int = 12):
+    def __init__(self, tid: int, box: np.ndarray, cls: int, conf: float,
+                 max_history: int = 12, smooth_alpha: float = 0.2):
         self.tid = tid
         self.box = np.asarray(box, dtype=float).reshape(4)
         self.cls = int(cls)
@@ -35,21 +36,24 @@ class Track:
         self.age = 0
         self.missed = 0
         self.history = deque([self.box.copy()], maxlen=int(max_history))
+        self.smooth_alpha = float(smooth_alpha)   # NEW
 
     def update(self, box: np.ndarray, conf: float):
         box = np.asarray(box, dtype=float).reshape(4)
-        # light smoothing
-        self.box = 0.8 * self.box + 0.2 * box
+        a = self.smooth_alpha                        # NEW
+        self.box = (1.0 - a) * self.box + a * box    # NEW: parametric smoothing
         self.conf = float(conf)
         self.age += 1
         self.missed = 0
         self.history.append(self.box.copy())
 
 class IOUTracker:
-    def __init__(self, iou_thresh: float = 0.3, max_missed: int = 10, max_history: int = 12):
+    def __init__(self, iou_thresh: float = 0.3, max_missed: int = 10,
+                 max_history: int = 12, smooth_alpha: float = 0.2):  # NEW
         self.iou_thresh = float(iou_thresh)
         self.max_missed = int(max_missed)
         self.max_history = int(max_history)
+        self.smooth_alpha = float(smooth_alpha)      # NEW
         self.next_id = 1
         self.tracks: List[Track] = []
 
@@ -81,7 +85,8 @@ class IOUTracker:
         for i, db in enumerate(det_boxes):
             if i not in assigned and _valid_box(db):
                 self.tracks.append(
-                    Track(self.next_id, db, int(det_clses[i]), float(det_confs[i]), max_history=self.max_history)
+                    Track(self.next_id, db, int(det_clses[i]), float(det_confs[i]),
+                          max_history=self.max_history, smooth_alpha=self.smooth_alpha)  # NEW
                 )
                 self.next_id += 1
 

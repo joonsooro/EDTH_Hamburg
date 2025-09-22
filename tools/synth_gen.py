@@ -20,31 +20,6 @@ def move_box_xyxy(b, dx, dy, W, H):
     x1,y1,x2,y2 = b
     return clamp_box_xyxy([x1+dx, y1+dy, x2+dx, y2+dy], W, H)
 
-def place_parasites(ms_box, W, H, min_px=20, max_px=40, min_q=2, max_q=3):
-    """
-    Place 2–3 parasite boxes in the pylon band under mothership.
-    Returns list of [x1,y1,x2,y2].
-    """
-    import numpy as np
-    x1,y1,x2,y2 = [float(v) for v in ms_box]
-    mw, mh = x2-x1, y2-y1
-    band_top = y1 + 0.12*mh
-    band_bot = y1 + 0.22*mh
-    lx = x1 + 0.20*mw
-    rx = x2 - 0.20*mw
-
-    n_quads = np.random.randint(min_q, max_q+1)
-    quads = []
-    for i in range(n_quads):
-        side = int(np.random.uniform(min_px, max_px))
-        frac = np.linspace(0.25, 0.75, max(2,n_quads))[i]
-        cx = lx + frac*(rx-lx)
-        cy = np.random.uniform(band_top, band_bot)
-        qx1 = cx - side/2; qy1 = cy - side/2
-        qx2 = qx1 + side;  qy2 = qy1 + side
-        quads.append(clamp_box_xyxy([qx1,qy1,qx2,qy2], W, H))
-    return quads
-
 
 # --- config defaults (can be overridden by CLI) ---
 MIN_QUAD_PX = 20     # min width/height of a quad (px) on the FINAL frame
@@ -114,7 +89,6 @@ def write_with_ffmpeg(frames, out_path, fps=24):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-import numpy as np
 
 def place_parasites(ms_box, frame_w, frame_h,
                     min_px=20, max_px=40,

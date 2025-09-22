@@ -1,6 +1,9 @@
 from __future__ import annotations
 import numpy as np
 from typing import List, Tuple, Dict
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from vision.classes import MOTHERSHIP_NAMES, PARASITE_NAMES
 
 # Relation logic: detect "mothership (fixed-wing proxy) with parasites (small drones) under wings"
 # Works over *current-frame detections + last known track states*.
@@ -23,8 +26,8 @@ def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 class CarrierRelationConfig:
     def __init__(
         self,
-        mothership_cls_names=("fixed_wing",),       # ✅ your trained names
-        parasite_cls_names=("quad",),               # ✅ your trained names
+        mothership_cls_names=MOTHERSHIP_NAMES,       # ✅ your trained names
+        parasite_cls_names=PARASITE_NAMES,               # ✅ your trained names
         band_rel_top=0.12, band_rel_bottom=0.22, band_rel_width=0.60,
         size_ratio_min=0.015, size_ratio_max=0.50,
         min_persist_frames=3,                      # start easier; tune up later
@@ -44,8 +47,13 @@ class CarrierRelationConfig:
         self.vel_cos_min = vel_cos_min
         self.min_speed_px = min_speed_px
 
-def clsname(id_: int, class_map: Dict[int,str]) -> str:
-    return class_map.get(id_, str(id_))
+def clsname(id_: int, class_map: Dict[int, str]) -> str:
+    try:
+        k = int(id_)
+    except Exception:
+        k = int(float(id_))  # last-ditch
+    return class_map.get(k, str(k))
+
 
 def box_area(b):
     x1,y1,x2,y2 = b

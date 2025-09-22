@@ -1,0 +1,32 @@
+# YOLOv8n backbone+head config
+nc: 1   # number of classes (set 1 for overfit)
+depth_multiple: 0.33
+width_multiple: 0.25
+anchors: 3
+
+backbone:
+  - [-1, 1, Conv, [16, 3, 2]]
+  - [-1, 1, Conv, [32, 3, 2]]
+  - [-1, 1, C2f, [32, 1, True]]
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [-1, 2, C2f, [64, 2, True]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [-1, 2, C2f, [128, 2, True]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [-1, 1, C2f, [256, 1, True]]
+  - [-1, 1, SPPF, [256, 5]]
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 1, C2f, [128, 1]]
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 1, C2f, [64, 1]]
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 1, C2f, [128, 1]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 1, C2f, [256, 1]]
+  - [[15, 18, 21], 1, Detect, [nc, [64, 128, 256]]]

@@ -1,0 +1,6 @@
+{
+  "pixel_scale": { "frames_tested": 10, "hits": 10, "min_hits_required": 3 },
+  "relation": { "video": "data/golden/drones.mp4", "frames": 200, "total_boxes": 282, "in_band_count": 0, "alerts_frames": 0 },
+  "motion":   { "video": "data/golden/drones.mp4", "frames": 200, "frames_with_motion": 84, "hit_rate": 0.42 },
+  "overfit_one_image": { "status": "PASS", "note": "box≥0.8 on frame_123" }
+}

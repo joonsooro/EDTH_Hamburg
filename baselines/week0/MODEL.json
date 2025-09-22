@@ -1,0 +1,8 @@
+{
+  "weights": "models/best.pt",
+  "sha256": "c8a99eed9a9a7a24bb21eb3fdf10ba0d41ce2715e7c16637d58e9d8d4a655a9e",
+  "ultralytics_version": "8.3.17",
+  "torch_version": "2.8.0",
+  "device": "<cpu/mps/cuda>",
+  "names": {"0":"fixed_wing","1":"quad"}
+}

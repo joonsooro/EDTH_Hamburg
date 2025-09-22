@@ -1,0 +1,7 @@
+{
+  "video": "data/golden/drones.mp4",
+  "frames": 200,
+  "frames_with_motion": 84,
+  "hit_rate": 0.42,
+  "note": "Should be >0 on dynamic scenes; tune mag/area if 0."
+}

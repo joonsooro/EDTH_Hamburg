@@ -1,0 +1,10 @@
+{
+  "video": "data/golden/drones.mp4",
+  "frames": 200,
+  "total_boxes": 282,
+  "boxes_per_frame": 1.41,
+  "in_band_count": 0,
+  "alerts_frames": 0,
+  "alerts_rate_per_min@24fps": 0.0,
+  "note": "Store this JSON as your baseline; post-training must beat it."
+}
